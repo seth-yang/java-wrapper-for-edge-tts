@@ -16,14 +16,8 @@ public class SSMLPayload implements Serializable {
     "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='%s'>\r\n" +
     "<voice name='%s'><prosody pitch='+0Hz' rate='%s' volume='%s'>%s</prosody></voice></speak>";
 
-//    /** 音频格式 */
-//    VoiceFormat format;
-
     /** 语音角色 */
     VoiceRole role;
-
-//    /** 语音分格 */
-//    VoiceStyle style;
 
     /**
      * 相对语速

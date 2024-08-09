@@ -39,8 +39,10 @@ public class TTS {
 
     /** messages waiting for send to the websocket */
     private final Queue<String> queue = new LinkedList<> ();
+
     /** any listener actions */
     private final BlockingQueue<Runnable> tasks = new LinkedBlockingQueue<> ();
+
     /** the quit signal */
     private final Runnable QUIT = () -> {};
     private final Lock locker = new ReentrantLock (true);
@@ -48,18 +50,28 @@ public class TTS {
 
     /** the main configurations */
     private final TTSConfig config = new TTSConfig ();
+
     /** executing tasks */
     private final List<Future<?>> futures = new ArrayList<> (3);
 
+    /** mp3 播放器 */
     private AdvancedPlayer player;
 
+    /** websocket 客户端 */
     private WebSocketClient client;
 
+    /** 指示是否正在合成语音的治时期 */
     private volatile boolean synthesising = false;
+
     private volatile boolean running = true;
 
+    /** TTS Listener */
     private volatile ITTSListener listener;
+
+    /** 最近一次从 websocket 服务器端接收数据 */
     private volatile long timestamp = -1;
+
+    /** 当前正在处理的文本 */
     private volatile String current;
 
     public TTS () throws IOException {
@@ -84,6 +96,10 @@ public class TTS {
         return config;
     }
 
+    /**
+     * 添加一段文本到等待合成的队列中
+     * @param text 待合成的文本
+     */
     public void synthesis (String text) {
         int retry = 3;
         while (retry --> 0) {
@@ -134,6 +150,9 @@ public class TTS {
         }
     }
 
+    /**
+     * 向服务器端发送希望接收的语音格式
+     */
     private void setVoiceFormat () {
         VoiceFormat format = config.format;
         if (format == null) {
@@ -158,7 +177,9 @@ public class TTS {
 
                     @Override
                     public void onOpen (ServerHandshake handshake) {
+                        // update the timestamp
                         timestamp = System.currentTimeMillis ();
+                        // 检查是否开启了文件保存模式，若是，则准备好待写入的文件
                         if ((config.mode & MODE_SAVE) != 0 && config.dir != null && !config.dir.isEmpty ()) {
                             try {
                                 String fileName = sdf.format (System.currentTimeMillis ()) + ".mp3";
@@ -173,21 +194,26 @@ public class TTS {
 
                     @Override
                     public void onMessage (String text) {
+                        // update the timestamp
                         timestamp = System.currentTimeMillis ();
                         if (logger.isTraceEnabled ()) {
                             logger.trace ("receive a text message: {}", text);
                         }
+
                         if (text.contains (TURN_START)) {
+                            // 开始合成一段文本，触发监听器
                             if (listener != null) {
                                 if (!tasks.offer (() -> listener.started (current))) {
                                     logger.warn ("cannot offer the listener when start");
                                 }
                             }
                         } else if (text.contains(TURN_END)) {
+                            // 一段文本合成完成
                             synthesising = false;   // 一段解码结束
-
+                            // close the file stream
                             closeStream ();
-
+                            // Send a signal to announce that a speech synthesis is completed
+                            // and the next task can be carried out
                             try {
                                 locker.lockInterruptibly ();
                                 c.signalAll ();
@@ -195,6 +221,7 @@ public class TTS {
                             } finally {
                                 locker.unlock ();
                             }
+                            // trigger the listener
                             if (listener != null) {
                                 if (!tasks.offer (() -> listener.finished (current))) {
                                     logger.warn ("cannot offer the listener.finished when end");
@@ -210,6 +237,7 @@ public class TTS {
                                 }
                             }
 
+                            // 如果是 on shot，直接销毁实例
                             if (config.oneShot) {
                                 dispose ();
                             }
@@ -253,8 +281,9 @@ public class TTS {
                     @Override
                     public void onClose (int code, String reason, boolean remote) {
                         logger.info ("websocket closed, code = {}, reason = {}", code, reason);
+                        // reset the timestamp
                         timestamp = -1;
-
+                        // close and clean file stream
                         closeStream ();
                     }
 
@@ -274,6 +303,8 @@ public class TTS {
                     }
                 };
                 client.connectBlocking ();
+                // When the websocket connection is complete,
+                // send the desired audio format to the server
                 setVoiceFormat ();
             } catch (Exception ex) {
                 throw new RuntimeException (ex);
@@ -293,7 +324,11 @@ public class TTS {
         Thread.currentThread ().setName ("synthesis");
         while (running) {
             if (timestamp >= 0 && System.currentTimeMillis () - timestamp > config.timeout) {
-                logger.warn ("there's over {} ms not receive any message, disconnect the websocket temp!", config.timeout);
+                logger.warn (
+                        "No data has been received for more than {} milliseconds, " +
+                        "entering Idle mode and disconnecting the websocket connection",
+                        config.timeout
+                );
                 closeWebsocket ();
 
                 if (listener != null) {
@@ -303,15 +338,18 @@ public class TTS {
                 }
                 timestamp = -1;
             }
+            // take next message.
             String message = queue.poll ();
             if (message != null && !message.isEmpty ()) {
                 if (logger.isTraceEnabled ()) {
                     logger.trace ("a new text[{}] take.", message);
                 }
+                // set the synthesising.
                 synthesising = true;
                 current = message;
                 SSMLPayload payload = config.synthesis (message);
                 getOrCreateWebsocketClient ().send (payload.toString ());
+                // Waiting for the previous task to complete
                 while (synthesising) {
                     try {
                         locker.lockInterruptibly ();
@@ -323,6 +361,7 @@ public class TTS {
                     }
                 }
             }
+
             delay ();
         }
         logger.info ("main synthesis loop finished.");
