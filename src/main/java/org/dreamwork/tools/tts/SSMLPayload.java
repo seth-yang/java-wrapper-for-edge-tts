@@ -26,7 +26,6 @@ public class SSMLPayload implements Serializable {
      * 例如 <pre>
      * &lt;prosody rate="50%"&gt;some text&lt;/prosody&gt;</pre> 或 <pre>
      * &lt;prosody rate="-50%"&gt;some text&lt;/prosody&gt;</pre>
-     * </p>
      */
     String rate = "1";
     /**
