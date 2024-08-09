@@ -36,7 +36,7 @@ import org.dreamwork.tools.tts.TTS;
 
 import java.io.IOException;
 
-public class OnsShotAndSaveFileExample {
+public class OneShotAndSaveFileExample {
     public static void main (String[] args) throws IOException {
         TTS tts = new TTS ();
         tts.setListener (new ITTSListener () {
