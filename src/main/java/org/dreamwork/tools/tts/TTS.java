@@ -123,6 +123,18 @@ public class TTS {
      */
     public void dispose () {
         running = false;
+
+        try {
+            locker.lockInterruptibly ();
+            c.signalAll ();
+        } catch (InterruptedException ignore) {}
+        finally {
+            locker.unlock ();
+        }
+        if (logger.isDebugEnabled ()) {
+            logger.debug ("release the locker");
+        }
+
         if (player != null) {
             player.stop ();
         }
@@ -194,6 +206,9 @@ public class TTS {
 
                     @Override
                     public void onMessage (String text) {
+                        if (logger.isDebugEnabled ()) {
+                            logger.debug ("received a message: {}", text);
+                        }
                         // update the timestamp
                         timestamp = System.currentTimeMillis ();
                         if (logger.isTraceEnabled ()) {
@@ -285,6 +300,12 @@ public class TTS {
                         timestamp = -1;
                         // close and clean file stream
                         closeStream ();
+
+                        if (code != 1000) {
+                            // something happened
+                            dispose ();
+                            throw new RuntimeException ("websocket closed unexpected: code = " + code + ", reason = " + reason);
+                        }
                     }
 
                     @Override
@@ -352,6 +373,9 @@ public class TTS {
                 // Waiting for the previous task to complete
                 while (synthesising) {
                     try {
+                        if (logger.isDebugEnabled ()) {
+                            logger.debug ("waiting for lock be released.");
+                        }
                         locker.lockInterruptibly ();
                         c.awaitUninterruptibly ();
                     } catch (InterruptedException ex) {
@@ -403,7 +427,7 @@ public class TTS {
             player.play ();
         } catch (Exception ex) {
             logger.warn (ex.getMessage (), ex);
-            throw new RuntimeException (ex);
+//            throw new RuntimeException (ex);
         }
         logger.info ("player done.");
     }
