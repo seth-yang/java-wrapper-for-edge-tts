@@ -1,5 +1,9 @@
 package org.dreamwork.tools.tts;
 
+import java.time.ZonedDateTime;
+
+import static java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+
 public enum VoiceFormat {
     amr_wb_16000hz("amr-wb-16000hz"),
     audio_16khz_16bit_32kbps_mono_opus("audio-16khz-16bit-32kbps-mono-opus"),
@@ -35,4 +39,19 @@ public enum VoiceFormat {
     VoiceFormat (String value) {
         this.value = value;
     }
+
+    static String asJson (VoiceFormat format) {
+        return String.format (
+                PATTERN,
+                ISO_OFFSET_DATE_TIME.format (ZonedDateTime.now ()),
+                format.value
+        );
+    }
+
+    private static final String PATTERN =
+    "X-Timestamp:%s\r\n" +
+    "Content-Type:application/json; charset=utf-8\r\n" +
+    "Path:speech.config\r\n" +
+    "\r\n" +
+    "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"true\"},\"outputFormat\":\"%s\"}}}}";
 }

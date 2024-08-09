@@ -1,34 +1,37 @@
 package org.dreamwork.tools.tts;
 
-import io.ikfly.constant.OutputFormat;
-import io.ikfly.exceptions.TtsException;
-import io.ikfly.model.SSML;
-import io.ikfly.model.SpeechConfig;
-import io.ikfly.util.Tools;
 import javazoom.jl.player.advanced.AdvancedPlayer;
 import javazoom.jl.player.advanced.PlaybackEvent;
 import javazoom.jl.player.advanced.PlaybackListener;
-import okhttp3.*;
-import okio.ByteString;
-import org.jetbrains.annotations.NotNull;
+import org.java_websocket.client.WebSocketClient;
+import org.java_websocket.handshake.ServerHandshake;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
+import java.io.*;
+import java.net.URI;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static io.ikfly.constant.TtsConstants.*;
+import static org.dreamwork.tools.tts.TTSConfig.MODE_REALTIME;
+import static org.dreamwork.tools.tts.TTSConfig.MODE_SAVE;
+import static org.dreamwork.tools.tts.VoiceFormat.audio_24khz_48kbitrate_mono_mp3;
 
 public class TTS {
-    private static final byte[] BA_AUDIO_START = AUDIO_START.getBytes (StandardCharsets.UTF_8);
-    private static final byte[] BA_AUDIO_CONTENT_TYPE = AUDIO_CONTENT_TYPE.getBytes(StandardCharsets.UTF_8);
+
+    /** 音频流开始传输标记 */
+    private static final String TURN_START = "turn.start";
+    /** 音频流结束传输标记 */
+    private static final String TURN_END = "turn.end";
 
     private final Logger logger = LoggerFactory.getLogger (TTS.class);
     private final PipedInputStream pis;
@@ -49,73 +52,15 @@ public class TTS {
     private final List<Future<?>> futures = new ArrayList<> (3);
 
     private AdvancedPlayer player;
-    private WebSocket websocket;
-    private OkHttpClient okHttpClient;
+
+    private WebSocketClient client;
+
     private volatile boolean synthesising = false;
     private volatile boolean running = true;
-    private volatile OutputFormat outputFormat;
 
     private volatile ITTSListener listener;
     private volatile long timestamp = -1;
-
-    private final WebSocketListener webSocketListener = new WebSocketListener() {
-        @Override
-        public void onOpen (@NotNull WebSocket webSocket, @NotNull Response response) {
-            timestamp = System.currentTimeMillis ();
-            logger.info ("websocket opened.");
-        }
-
-        @Override
-        public void onMessage (@NotNull WebSocket webSocket, @NotNull String text) {
-            timestamp = System.currentTimeMillis ();
-            if (text.contains (TURN_START)) {
-                if (listener != null) {
-                    if (!tasks.offer (() -> listener.started (text))) {
-                        logger.warn ("cannot offer the listener when start");
-                    }
-                }
-            } else if (text.contains(TURN_END)) {
-                if (logger.isTraceEnabled ()) {
-                    logger.trace ("receive a text message: {}", text);
-                }
-                synthesising = false;   // 一段解码结束
-                try {
-                    locker.lockInterruptibly ();
-                    c.signalAll ();
-                } catch (InterruptedException ignore) {
-                } finally {
-                    locker.unlock ();
-                }
-                if (listener != null) {
-                    if (!tasks.offer (() -> listener.finished (text))) {
-                        logger.warn ("cannot offer the listener.finished when end");
-                    }
-                }
-            }
-        }
-
-        @Override
-        public void onMessage (@NotNull WebSocket webSocket, @NotNull ByteString bytes) {
-            timestamp = System.currentTimeMillis ();
-            int index = bytes.lastIndexOf(BA_AUDIO_START) + AUDIO_START.length ();
-            int content = bytes.indexOf (BA_AUDIO_CONTENT_TYPE);
-            if (index != -1 && content != -1) {
-                try {
-                    ByteString substring = bytes.substring (index);
-                    substring.write (pos);
-                    pos.flush ();
-                } catch (Exception e) {
-                    logger.error("onMessage Error," + e.getMessage(), e);
-                }
-            }
-        }
-
-        @Override
-        public void onClosed (@NotNull WebSocket webSocket, int code, @NotNull String reason) {
-            logger.info ("websocket closed, code = {}, reason = {}", code, reason);
-            timestamp = -1;
-        }
-    };
+    private volatile String current;
 
     public TTS () throws IOException {
         pos = new PipedOutputStream ();
@@ -131,12 +76,11 @@ public class TTS {
         executor.shutdown ();
     }
 
-    public TTS oneShot () {
-        config.oneShot ();
-        return this;
-    }
-
-    public TTSConfig getConfig () {
+    /**
+     * 获取转换配置
+     * @return TTSConfig 实例
+     */
+    public TTSConfig config () {
         return config;
     }
 
@@ -157,11 +101,18 @@ public class TTS {
         this.listener = listener;
     }
 
+    /**
+     * 销毁实例.
+     * <p>当一个 {@code TTS} 实例被销毁后，<strong>不能再</strong>进行语音转换</p>
+     */
     public void dispose () {
         running = false;
-        player.stop ();
-        tasks.clear ();
+        if (player != null) {
+            player.stop ();
+        }
+
         try {
+            tasks.clear ();
             tasks.put (QUIT);
         } catch (InterruptedException ignore) {
         }
@@ -172,10 +123,9 @@ public class TTS {
         try {
             pos.close ();
         } catch (IOException ignore) {}
-        if (websocket != null) {
-            websocket.close (1000, "bye");
-            websocket = null;
-        }
+
+        closeWebsocket ();
+
         if (!futures.isEmpty ()) {
             for (Future<?> future : futures) {
                 future.cancel (true);
@@ -184,39 +134,152 @@ public class TTS {
         }
     }
 
-    private void sendConfig (OutputFormat outputFormat) {
-        SpeechConfig speechConfig = SpeechConfig.of (outputFormat);
-        logger.debug ("audio config:{}", speechConfig);
-        if (!getOrCreateWs ().send (speechConfig.toString ())) {
-            throw TtsException.of ("语音输出格式配置失败...");
+    private void setVoiceFormat () {
+        VoiceFormat format = config.format;
+        if (format == null) {
+            format = config.format = audio_24khz_48kbitrate_mono_mp3;
         }
-        this.outputFormat = speechConfig.getOutputFormat ();
+        getOrCreateWebsocketClient ().send (VoiceFormat.asJson (format));
     }
 
-    private synchronized WebSocket getOrCreateWs () {
-        if (Objects.nonNull (websocket)) {
-            return websocket;
-        }
+    private synchronized WebSocketClient getOrCreateWebsocketClient () {
+        if (client == null) {
+            String url = config.WS_URL + "?Retry-After=200" +
+                         "&TrustedClientToken=" + config.TOKEN +
+                         "&ConnectionId=" + UUID.randomUUID().toString().replace("-", "");
+            Map<String, String> header = new HashMap<> ();
+            header.put ("User-Agent", config.UA);
+            header.put ("Origin", config.ORIGIN);
+            try {
+                client = new WebSocketClient (new URI (url), header) {
+                    private OutputStream stream;
+                    private Path target;
+                    private final SimpleDateFormat sdf = new SimpleDateFormat ("yyyy-MM-dd_HH-mm-ss");
 
-        String url = EDGE_SPEECH_WSS + "?Retry-After=200&TrustedClientToken=" +
-                     TRUSTED_CLIENT_TOKEN + "&ConnectionId=" + Tools.getRandomId ();
-        Request request = new Request.Builder ()
-                .url (url)
-                .addHeader ("User-Agent", UA)
-                .addHeader ("Origin", EDGE_SPEECH_ORIGIN)
-                .build ();
-        websocket = getOkHttpClient ().newWebSocket (request, webSocketListener);
-        sendConfig (outputFormat);
-        return websocket;
-    }
+                    @Override
+                    public void onOpen (ServerHandshake handshake) {
+                        timestamp = System.currentTimeMillis ();
+                        if ((config.mode & MODE_SAVE) != 0 && config.dir != null && !config.dir.isEmpty ()) {
+                            try {
+                                String fileName = sdf.format (System.currentTimeMillis ()) + ".mp3";
+                                target = Paths.get (config.dir, fileName);
+                                stream = Files.newOutputStream (target);
+                            } catch (IOException ex) {
+                                logger.warn (ex.getMessage (), ex);
+                            }
+                        }
+                        logger.info ("websocket opened.");
+                    }
 
-    private OkHttpClient getOkHttpClient () {
-        if (okHttpClient == null) {
-            okHttpClient = new OkHttpClient.Builder ()
-                    .pingInterval (20, TimeUnit.SECONDS) // 设置 PING 帧发送间隔
-                    .build ();
+                    @Override
+                    public void onMessage (String text) {
+                        timestamp = System.currentTimeMillis ();
+                        if (logger.isTraceEnabled ()) {
+                            logger.trace ("receive a text message: {}", text);
+                        }
+                        if (text.contains (TURN_START)) {
+                            if (listener != null) {
+                                if (!tasks.offer (() -> listener.started (current))) {
+                                    logger.warn ("cannot offer the listener when start");
+                                }
+                            }
+                        } else if (text.contains(TURN_END)) {
+                            synthesising = false;   // 一段解码结束
+
+                            closeStream ();
+
+                            try {
+                                locker.lockInterruptibly ();
+                                c.signalAll ();
+                            } catch (InterruptedException ignore) {
+                            } finally {
+                                locker.unlock ();
+                            }
+                            if (listener != null) {
+                                if (!tasks.offer (() -> listener.finished (current))) {
+                                    logger.warn ("cannot offer the listener.finished when end");
+                                }
+                                if (!tasks.offer (() -> {
+                                    try {
+                                        listener.voiceSaved (current, target);
+                                    } finally {
+                                        target = null;
+                                    }
+                                })) {
+                                    logger.warn ("cannot offer the listener.voiceSaved");
+                                }
+                            }
+
+                            if (config.oneShot) {
+                                dispose ();
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onMessage (ByteBuffer bytes) {
+                        timestamp = System.currentTimeMillis ();
+                        // 至少一个模式被激活了
+                        if (config.mode != 0) {
+                            String line;
+                            while (!(line = readLine (bytes)).isEmpty ()) {
+                                if ("Path:audio".equals (line.trim ())) {
+                                    break;
+                                }
+                            }
+                            // the voice data length
+                            int remains = bytes.remaining ();
+                            byte[] buff = new byte[remains];
+                            bytes.get (buff);
+                            if ((config.mode & MODE_REALTIME) != 0) {
+                                try {
+                                    pos.write (buff);
+                                    pos.flush ();
+                                } catch (IOException ex) {
+                                    //
+                                }
+                            }
+
+                            if (stream != null) {
+                                try {
+                                    stream.write (buff);
+                                    stream.flush ();
+                                } catch (IOException ignore) {
+                                }
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onClose (int code, String reason, boolean remote) {
+                        logger.info ("websocket closed, code = {}, reason = {}", code, reason);
+                        timestamp = -1;
+
+                        closeStream ();
+                    }
+
+                    @Override
+                    public void onError (Exception ex) {}
+
+                    private void closeStream () {
+                        if (stream != null) {
+                            try {
+                                stream.flush ();
+                                stream.close ();
+                            } catch (IOException ignore) {}
+                            finally {
+                                stream = null;
+                            }
+                        }
+                    }
+                };
+                client.connectBlocking ();
+                setVoiceFormat ();
+            } catch (Exception ex) {
+                throw new RuntimeException (ex);
+            }
         }
-        return okHttpClient;
+        return client;
     }
 
     private void delay () {
@@ -231,11 +294,8 @@ public class TTS {
         while (running) {
             if (timestamp >= 0 && System.currentTimeMillis () - timestamp > config.timeout) {
                 logger.warn ("there's over {} ms not receive any message, disconnect the websocket temp!", config.timeout);
-                if (websocket != null) {
-                    websocket.close (1000, "bye");
-                    logger.info ("the websocket closed.");
-                    websocket = null;
-                }
+                closeWebsocket ();
+
                 if (listener != null) {
                     if (!tasks.offer (() -> listener.idle ())) {
                         logger.warn ("cannot offer the listener idle");
@@ -246,19 +306,12 @@ public class TTS {
             String message = queue.poll ();
             if (message != null && !message.isEmpty ()) {
                 if (logger.isTraceEnabled ()) {
-                    logger.trace ("a new text[{}] token.", message);
+                    logger.trace ("a new text[{}] take.", message);
                 }
                 synthesising = true;
-                SSML ssml = config.synthesis (message);
-
-                if (Objects.nonNull (ssml.getOutputFormat ()) && !ssml.getOutputFormat ().equals (outputFormat)) {
-                    sendConfig (ssml.getOutputFormat ());
-                }
-                if (!getOrCreateWs ().send (ssml.toString ())) {
-                    logger.warn ("cannot send text: {}", message);
-                } else if (logger.isTraceEnabled ()) {
-                    logger.trace ("text[{}] send ok.", ssml);
-                }
+                current = message;
+                SSMLPayload payload = config.synthesis (message);
+                getOrCreateWebsocketClient ().send (payload.toString ());
                 while (synthesising) {
                     try {
                         locker.lockInterruptibly ();
@@ -314,5 +367,32 @@ public class TTS {
             throw new RuntimeException (ex);
         }
         logger.info ("player done.");
+    }
+
+    private void closeWebsocket () {
+        if (client != null) {
+            client.close (1000, "bye");
+            client = null;
+        }
+    }
+
+    private String readLine (ByteBuffer buffer) {
+        byte[] target = new byte[128];
+        int index = 0, remains = buffer.remaining ();
+        if (remains == 0) {
+            return "";
+        }
+        while (index < remains) {
+            if (index >= target.length) {
+                byte[] temp = new byte[target.length << 1];
+                System.arraycopy (target, 0, temp, 0, target.length);
+                target = temp;
+            }
+            target[index] = buffer.get ();
+            if (target[index ++] == '\n') {
+                break;
+            }
+        }
+        return new String (target, 0, index, StandardCharsets.UTF_8);
     }
 }
