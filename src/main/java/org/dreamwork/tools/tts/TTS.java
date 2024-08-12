@@ -22,8 +22,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.dreamwork.tools.tts.TTSConfig.MODE_REALTIME;
-import static org.dreamwork.tools.tts.TTSConfig.MODE_SAVE;
+import static org.dreamwork.tools.tts.TTSConfig.*;
 import static org.dreamwork.tools.tts.VoiceFormat.audio_24khz_48kbitrate_mono_mp3;
 
 public class TTS {
@@ -194,7 +193,10 @@ public class TTS {
                         // 检查是否开启了文件保存模式，若是，则准备好待写入的文件
                         if ((config.mode & MODE_SAVE) != 0 && config.dir != null && !config.dir.isEmpty ()) {
                             try {
-                                String fileName = sdf.format (System.currentTimeMillis ()) + ".mp3";
+                                String format = config.format.toString ();
+                                int position = format.lastIndexOf ('_');
+                                String ext = format.substring (position + 1);
+                                String fileName = sdf.format (System.currentTimeMillis ()) + "." + ext;
                                 target = Paths.get (config.dir, fileName);
                                 stream = Files.newOutputStream (target);
                             } catch (IOException ex) {
@@ -241,14 +243,16 @@ public class TTS {
                                 if (!tasks.offer (() -> listener.finished (current))) {
                                     logger.warn ("cannot offer the listener.finished when end");
                                 }
-                                if (!tasks.offer (() -> {
-                                    try {
-                                        listener.voiceSaved (current, target);
-                                    } finally {
-                                        target = null;
+                                if ((config.mode & MODE_SAVE) != 0 && stream != null) {
+                                    if (!tasks.offer (() -> {
+                                        try {
+                                            listener.voiceSaved (current, target);
+                                        } finally {
+                                            target = null;
+                                        }
+                                    })) {
+                                        logger.warn ("cannot offer the listener.voiceSaved");
                                     }
-                                })) {
-                                    logger.warn ("cannot offer the listener.voiceSaved");
                                 }
                             }
 
@@ -274,21 +278,17 @@ public class TTS {
                             int remains = bytes.remaining ();
                             byte[] buff = new byte[remains];
                             bytes.get (buff);
+                            // 实时模式，将数据复制到播放器中
                             if ((config.mode & MODE_REALTIME) != 0) {
-                                try {
-                                    pos.write (buff);
-                                    pos.flush ();
-                                } catch (IOException ex) {
-                                    //
-                                }
+                                copy (buff, pos);
                             }
-
-                            if (stream != null) {
-                                try {
-                                    stream.write (buff);
-                                    stream.flush ();
-                                } catch (IOException ignore) {
-                                }
+                            // 转发模式，将数据复制到输出流中
+                            if ((config.mode & MODE_FORWARDING) != 0 && config.output != null) {
+                                copy (buff, config.output);
+                            }
+                            // 文件保存模式，将数据复制到文件流中
+                            if ((config.mode & MODE_SAVE) != 0 && stream != null) {
+                                copy (buff, stream);
                             }
                         }
                     }
@@ -371,7 +371,7 @@ public class TTS {
                 SSMLPayload payload = config.synthesis (message);
                 getOrCreateWebsocketClient ().send (payload.toString ());
                 // Waiting for the previous task to complete
-                while (synthesising) {
+                while (synthesising && running) {
                     try {
                         if (logger.isDebugEnabled ()) {
                             logger.debug ("waiting for lock be released.");
@@ -427,8 +427,8 @@ public class TTS {
             player.play ();
         } catch (Exception ex) {
             logger.warn (ex.getMessage (), ex);
-//            throw new RuntimeException (ex);
         }
+        player = null;
         logger.info ("player done.");
     }
 
@@ -457,5 +457,14 @@ public class TTS {
             }
         }
         return new String (target, 0, index, StandardCharsets.UTF_8);
+    }
+
+    private void copy (byte[] buff, OutputStream out) {
+        try {
+            out.write (buff);
+            out.flush ();
+        } catch (IOException ex) {
+            logger.warn (ex.getMessage (), ex);
+        }
     }
 }

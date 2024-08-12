@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -46,6 +47,8 @@ public class TTSConfig {
 
     volatile String dir;
 
+    OutputStream output;
+
     /**
      * 运行模式.
      * <p>允许的运行模式有：</p>
@@ -58,6 +61,7 @@ public class TTSConfig {
 
     public static final int MODE_REALTIME = 0x01;
     public static final int MODE_SAVE = 0x02;
+    public static final int MODE_FORWARDING = 0x04;
 
     TTSConfig () {
         ClassLoader loader = getClass ().getClassLoader ();
@@ -168,6 +172,34 @@ public class TTSConfig {
      */
     public TTSConfig disableRealtimeMode () {
         mode &= ~MODE_REALTIME;
+        return this;
+    }
+
+    /**
+     * 激活数据转发模式
+     * @return TTSConfig 实例本身
+     */
+    public TTSConfig enableForwardMode () {
+        mode |= MODE_FORWARDING;
+        return this;
+    }
+
+    /**
+     * 取消数据转发模式
+     * @return TTSConfig 实例本身
+     */
+    public TTSConfig disableForwardMode () {
+        mode &= ~MODE_FORWARDING;
+        return this;
+    }
+
+    /**
+     * 设置数据转发的出口
+     * @param output 数据转发出口
+     * @return TTSConfig 实例本身
+     */
+    public TTSConfig forward (OutputStream output) {
+        this.output = output;
         return this;
     }
 
