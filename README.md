@@ -143,6 +143,47 @@ public class ChangeVoiceRoleExample {
     }
 }
 ```
+
+## Voice Data Forwarding
+```java
+import org.dreamwork.tools.tts.ITTSListener;
+import org.dreamwork.tools.tts.TTS;
+import org.dreamwork.tools.tts.VoiceFormat;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.concurrent.CountDownLatch;
+
+public class DataFrowardExample {
+    public static void main (String[] args) throws IOException, InterruptedException {
+        TTS tts = new TTS ();
+        CountDownLatch latch = new CountDownLatch (1);
+        tts.setListener (new ITTSListener () {
+            @Override
+            public void finished (String text) {
+                latch.countDown ();
+            }
+        });
+        Path target = Paths.get (System.getProperty ("java.io.tmpdir"), "forwarding.mp3");
+        try (OutputStream out = Files.newOutputStream (target, StandardOpenOption.CREATE)) {
+            tts.config ()
+                    .format (VoiceFormat.audio_24khz_48kbitrate_mono_mp3)
+                    .oneShot ()
+                    .enableForwardMode ()
+                    .forward (out);
+            tts.synthesis ("数据转发示例");
+            latch.await (); // wait for synthesis to complete
+            out.flush ();
+            System.out.println ("voice saved as: " + target.toRealPath ());
+        }
+    }
+}
+```
+
 ## Thanks
 - [https://github.com/ikfly/java-tts.git](https://github.com/ikfly/java-tts.git)
 - [https://github.com/ag2s20150909/TTS](https://github.com/ag2s20150909/TTS)
