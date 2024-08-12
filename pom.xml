@@ -4,7 +4,7 @@
 
     <groupId>io.github.seth-yang</groupId>
     <artifactId>java-wrapper-for-edge-tts</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <name>java-wrapper-for-edge-tts</name>
     <url>https://github.com/seth-yang/dreamwork-base</url>
     <description>A Java wrapper for Microsoft Edge-TTS</description>
