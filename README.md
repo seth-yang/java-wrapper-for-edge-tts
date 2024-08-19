@@ -7,7 +7,7 @@ A java wrapper for MS edge-tts
 <dependency>
     <groupId>io.github.seth-yang</groupId>
     <artifactId>java-wrapper-for-edge-tts</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 ## Examples
