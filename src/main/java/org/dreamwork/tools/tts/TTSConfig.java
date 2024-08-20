@@ -122,7 +122,7 @@ public class TTSConfig {
      */
     public TTSConfig timeout (int amount, TimeUnit unit) {
         if (amount < 0) {
-            logger.warn ("wrong time amount: " + amount + " of " + unit + ", use the default value: 30s.");
+            logger.warn ("wrong time amount: {} of {}, use the default value: 30s.", amount, unit);
             timeout = 500L;
         } else {
             timeout = unit.toMillis (amount);
