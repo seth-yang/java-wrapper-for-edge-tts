@@ -6,7 +6,7 @@
     <artifactId>java-wrapper-for-edge-tts</artifactId>
     <version>1.0.1</version>
     <name>java-wrapper-for-edge-tts</name>
-    <url>https://github.com/seth-yang/dreamwork-base</url>
+    <url>https://github.com/seth-yang/java-wrapper-for-edge-tts</url>
     <description>A Java wrapper for Microsoft Edge-TTS</description>
     <developers>
         <developer>
@@ -23,7 +23,7 @@
 
     <issueManagement>
         <system>Github</system>
-        <url>https://github.com/seth-yang/dreamwork-base/issues</url>
+        <url>https://github.com/seth-yang/java-wrapper-for-edge-tts/issues</url>
     </issueManagement>
 
     <licenses>
@@ -34,9 +34,9 @@
     </licenses>
 
     <scm>
-        <connection>scm:git:git://github.com/seth-yang/dreamwork-base</connection>
-        <developerConnection>scm:git:git@hithub.com:seth-yang/dreamwork-base</developerConnection>
-        <url>https://github.com/seth-yang/dreamwork-base</url>
+        <connection>scm:git:git://github.com/seth-yang/java-wrapper-for-edge-tts</connection>
+        <developerConnection>scm:git:git@hithub.com:seth-yang/java-wrapper-for-edge-tts</developerConnection>
+        <url>https://github.com/seth-yang/java-wrapper-for-edge-tts</url>
         <tag>HEAD</tag>
     </scm>
 
