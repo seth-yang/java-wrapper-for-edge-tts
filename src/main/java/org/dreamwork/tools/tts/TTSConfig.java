@@ -4,12 +4,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Properties;
+import java.text.SimpleDateFormat;
 import java.util.concurrent.TimeUnit;
 
 import static org.dreamwork.tools.tts.VoiceFormat.audio_24khz_48kbitrate_mono_mp3;
@@ -18,26 +17,24 @@ import static org.dreamwork.tools.tts.VoiceRole.Xiaoyi;
 /**
  * 调用 edge-tts 的配置信息
  */
+@SuppressWarnings ("unused")
 public class TTSConfig {
+    public static final int MODE_REALTIME = 0x01;
+    public static final int MODE_SAVE = 0x02;
+    public static final int MODE_FORWARDING = 0x04;
+
     private final Logger logger = LoggerFactory.getLogger (TTSConfig.class);
-    /** 调用 edge-tts 的模拟 User-Agent */
-    final String UA;
-    /** edge-tts 调用的 url */
-    final String WS_URL;
-    /** edge-tts 调用的 token */
-    final String TOKEN;
-    /** edge-tts 调用的 origin */
-    final String ORIGIN;
+    private final SimpleDateFormat sdf = new SimpleDateFormat ("yyyy-MM-dd_HH-mm-ss");
 
     /** 最终发送到 edge-tts 的内容 */
-    final SSMLPayload payload = new SSMLPayload (Xiaoyi);
+    final VoicePayload payload = new VoicePayload (null, Xiaoyi);
 
     /**
      * 转换任务的空闲时间，当两次任务的之间的间隔时间超出这个时间后，{@link TTS} 将进入 {@code Idle} 状态，
      * 断开 websocket 连接, 并且将触发 {@link ITTSListener#idle()} 事件.
      * <p><i>这个Idle 状态并不影响后续的转换任务</i></p>
      */
-    volatile long timeout = 30_000L; // 30s
+    volatile long timeout = 10_000L; // 10s
 
     /** 指示 {@link TTS} 在进入 {@code Idle} 状态后是否立即释放资源。 */
     volatile boolean oneShot = false;
@@ -47,6 +44,9 @@ public class TTSConfig {
 
     volatile String dir;
 
+    volatile Path target;
+    volatile OutputStream stream;
+
     OutputStream output;
 
     /**
@@ -55,31 +55,13 @@ public class TTSConfig {
      * <ul>
      *     <li>0x01 - 实时模式 (默认激活)</li>
      *     <li>0x02 - 保存文件</li>
+     *     <li>0x04 - 转发模式</li>
      * </ul>
      */
     int mode = 1;
 
-    public static final int MODE_REALTIME = 0x01;
-    public static final int MODE_SAVE = 0x02;
-    public static final int MODE_FORWARDING = 0x04;
-
     TTSConfig () {
-        ClassLoader loader = getClass ().getClassLoader ();
-        try (InputStream in = loader.getResourceAsStream ("edge-tts.properties")) {
-            if (in != null) {
-                Properties props = new Properties ();
-                props.load (in);
 
-                UA     = props.getProperty ("edge.tts.user-agent");
-                WS_URL = props.getProperty ("edge.tts.url");
-                TOKEN  = props.getProperty ("edge.tts.token");
-                ORIGIN = props.getProperty ("edge.tts.origin");
-            } else {
-                throw new RuntimeException ("cannot load static config");
-            }
-        } catch (IOException ex) {
-            throw new RuntimeException (ex);
-        }
     }
 
     /**
@@ -87,8 +69,8 @@ public class TTSConfig {
      * @param text 需要转换的文本
      * @return edge-tts 的 SSML 格式
      */
-    SSMLPayload synthesis (String text) {
-        payload.content = text;
+    VoicePayload synthesis (String text) {
+        payload.input = text;
         return payload;
     }
 
@@ -99,7 +81,7 @@ public class TTSConfig {
      * @see VoiceRole
      */
     public TTSConfig voice (VoiceRole role) {
-        payload.role = role;
+        payload.voice = role;
         return this;
     }
 
@@ -230,5 +212,38 @@ public class TTSConfig {
         }
         this.dir = dir;
         return this;
+    }
+
+    void check () {
+        if ((mode & MODE_SAVE) != 0) {
+            if (dir == null || dir.trim ().isEmpty ()) {
+                throw new RuntimeException ("you set the TTS in SAVE mode, but not set the output dir.");
+            }
+            try {
+                String format = this.format.toString ();
+                int position = format.lastIndexOf ('_');
+                String ext = format.substring (position + 1);
+                String fileName = sdf.format (System.currentTimeMillis ()) + "." + ext;
+                target = Paths.get (dir, fileName);
+                stream = Files.newOutputStream (target);
+            } catch (IOException ex) {
+                logger.warn (ex.getMessage (), ex);
+            }
+        }
+        if ((mode & MODE_FORWARDING) != 0 && output == null) {
+            throw new RuntimeException ("you set the TTS in FORWARDING mode, but the output stream is not set.");
+        }
+    }
+
+    void closeStream () {
+        if (stream != null) {
+            try {
+                stream.flush ();
+                stream.close ();
+            } catch (IOException ignore) {}
+            finally {
+                stream = null;
+            }
+        }
     }
 }

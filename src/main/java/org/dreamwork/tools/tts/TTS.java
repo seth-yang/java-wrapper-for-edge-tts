@@ -1,38 +1,50 @@
 package org.dreamwork.tools.tts;
 
+import com.google.gson.Gson;
 import javazoom.jl.player.advanced.AdvancedPlayer;
 import javazoom.jl.player.advanced.PlaybackEvent;
 import javazoom.jl.player.advanced.PlaybackListener;
-import org.java_websocket.client.WebSocketClient;
-import org.java_websocket.handshake.ServerHandshake;
+import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
-import java.net.URI;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import static org.dreamwork.tools.tts.Const.*;
 import static org.dreamwork.tools.tts.TTSConfig.*;
-import static org.dreamwork.tools.tts.VoiceFormat.audio_24khz_48kbitrate_mono_mp3;
 
 public class TTS {
+    /** command line argument parser */
+    private static final Pattern P = Pattern.compile ("^--(.*?)=(.*?)$");
+    /** default buffer size */
+    private static final int BUFF_SIZE = 1024;
+    /** MIME-Type */
+    private static final MediaType JSON = MediaType.get ("application/json;charset=utf-8");
+    /** default config dir */
+    private static final String[] CONFIGS = {
+            "../conf/edge-tts-wrapper.conf", "../conf/edge-tts-wrapper.properties",
+            "conf/edge-tts-wrapper.conf", "conf/edge-tts-wrapper.properties",
+            "edge-tts-wrapper.conf", "edge-tts-wrapper.properties"
+    };
 
-    /** 音频流开始传输标记 */
-    private static final String TURN_START = "turn.start";
-    /** 音频流结束传输标记 */
-    private static final String TURN_END = "turn.end";
+    /** the ok http client connection pool */
+    private final ConnectionPool cp = new ConnectionPool (3, 60, TimeUnit.SECONDS);
 
     private final Logger logger = LoggerFactory.getLogger (TTS.class);
+
+    /** pipe in-out for mp3 player */
     private final PipedInputStream pis;
     private final PipedOutputStream pos;
 
@@ -56,8 +68,14 @@ public class TTS {
     /** mp3 播放器 */
     private AdvancedPlayer player;
 
-    /** websocket 客户端 */
-    private WebSocketClient client;
+    /** the endpoint for synthesis */
+    private String endpoint;
+    /** the api key */
+    private String API_KEY;
+    /** the http proxy */
+    private Proxy proxy;
+    private String proxyUser, proxyPassword;
+
 
     /** 指示是否正在合成语音的治时期 */
     private volatile boolean synthesising = false;
@@ -73,7 +91,33 @@ public class TTS {
     /** 当前正在处理的文本 */
     private volatile String current;
 
-    public TTS () throws IOException {
+    private final OkHttpClient client;
+
+    public TTS (String... args) throws IOException {
+        // 先从命令行获取参数
+        Properties props = loadFromCommandLineArgs (args);
+        // 若命令行未提供参数，从 jvm 参数获取
+        if (props == null) {
+            endpoint = System.getProperty (KEY_ENDPOINT);
+            API_KEY  = System.getProperty (KEY_API_KEY);
+            if (endpoint != null && !endpoint.trim ().isEmpty () &&
+                    API_KEY  != null && !API_KEY.trim ().isEmpty ()) {
+                props = new Properties (System.getProperties ());
+            }
+        }
+        // 然后从 默认位置的配置文件获取参数
+        if (props == null) {
+            props = loadConfig ();
+        }
+
+        if (props != null) {
+            initHttp (props);
+        } else {
+            throw new RuntimeException ("cannot load config");
+        }
+
+        client = createClient ();
+
         pos = new PipedOutputStream ();
         pis = new PipedInputStream (pos);
 
@@ -151,7 +195,7 @@ public class TTS {
             pos.close ();
         } catch (IOException ignore) {}
 
-        closeWebsocket ();
+//        closeWebsocket ();
 
         if (!futures.isEmpty ()) {
             for (Future<?> future : futures) {
@@ -159,179 +203,6 @@ public class TTS {
             }
             futures.clear ();
         }
-    }
-
-    /**
-     * 向服务器端发送希望接收的语音格式
-     */
-    private void setVoiceFormat () {
-        VoiceFormat format = config.format;
-        if (format == null) {
-            format = config.format = audio_24khz_48kbitrate_mono_mp3;
-        }
-        getOrCreateWebsocketClient ().send (VoiceFormat.asJson (format));
-    }
-
-    private synchronized WebSocketClient getOrCreateWebsocketClient () {
-        if (client == null) {
-            String url = config.WS_URL + "?Retry-After=200" +
-                         "&TrustedClientToken=" + config.TOKEN +
-                         "&ConnectionId=" + UUID.randomUUID().toString().replace("-", "");
-            Map<String, String> header = new HashMap<> ();
-            header.put ("User-Agent", config.UA);
-            header.put ("Origin", config.ORIGIN);
-            try {
-                client = new WebSocketClient (new URI (url), header) {
-                    private OutputStream stream;
-                    private Path target;
-                    private final SimpleDateFormat sdf = new SimpleDateFormat ("yyyy-MM-dd_HH-mm-ss");
-
-                    @Override
-                    public void onOpen (ServerHandshake handshake) {
-                        // update the timestamp
-                        timestamp = System.currentTimeMillis ();
-                        // 检查是否开启了文件保存模式，若是，则准备好待写入的文件
-                        if ((config.mode & MODE_SAVE) != 0 && config.dir != null && !config.dir.isEmpty ()) {
-                            try {
-                                String format = config.format.toString ();
-                                int position = format.lastIndexOf ('_');
-                                String ext = format.substring (position + 1);
-                                String fileName = sdf.format (System.currentTimeMillis ()) + "." + ext;
-                                target = Paths.get (config.dir, fileName);
-                                stream = Files.newOutputStream (target);
-                            } catch (IOException ex) {
-                                logger.warn (ex.getMessage (), ex);
-                            }
-                        }
-                        logger.info ("websocket opened.");
-                    }
-
-                    @Override
-                    public void onMessage (String text) {
-                        if (logger.isDebugEnabled ()) {
-                            logger.debug ("received a message: {}", text);
-                        }
-                        // update the timestamp
-                        timestamp = System.currentTimeMillis ();
-                        if (logger.isTraceEnabled ()) {
-                            logger.trace ("receive a text message: {}", text);
-                        }
-
-                        if (text.contains (TURN_START)) {
-                            // 开始合成一段文本，触发监听器
-                            if (listener != null) {
-                                if (!tasks.offer (() -> listener.started (current))) {
-                                    logger.warn ("cannot offer the listener when start");
-                                }
-                            }
-                        } else if (text.contains(TURN_END)) {
-                            // 一段文本合成完成
-                            synthesising = false;   // 一段解码结束
-                            // close the file stream
-                            closeStream ();
-                            // Send a signal to announce that a speech synthesis is completed
-                            // and the next task can be carried out
-                            try {
-                                locker.lockInterruptibly ();
-                                c.signalAll ();
-                            } catch (InterruptedException ignore) {
-                            } finally {
-                                locker.unlock ();
-                            }
-                            // trigger the listener
-                            if (listener != null) {
-                                if (!tasks.offer (() -> listener.finished (current))) {
-                                    logger.warn ("cannot offer the listener.finished when end");
-                                }
-                                if ((config.mode & MODE_SAVE) != 0 && stream != null) {
-                                    if (!tasks.offer (() -> {
-                                        try {
-                                            listener.voiceSaved (current, target);
-                                        } finally {
-                                            target = null;
-                                        }
-                                    })) {
-                                        logger.warn ("cannot offer the listener.voiceSaved");
-                                    }
-                                }
-                            }
-
-                            // 如果是 on shot，直接销毁实例
-                            if (config.oneShot) {
-                                dispose ();
-                            }
-                        }
-                    }
-
-                    @Override
-                    public void onMessage (ByteBuffer bytes) {
-                        timestamp = System.currentTimeMillis ();
-                        // 至少一个模式被激活了
-                        if (config.mode != 0) {
-                            String line;
-                            while (!(line = readLine (bytes)).isEmpty ()) {
-                                if ("Path:audio".equals (line.trim ())) {
-                                    break;
-                                }
-                            }
-                            // the voice data length
-                            int remains = bytes.remaining ();
-                            byte[] buff = new byte[remains];
-                            bytes.get (buff);
-                            // 实时模式，将数据复制到播放器中
-                            if ((config.mode & MODE_REALTIME) != 0) {
-                                copy (buff, pos);
-                            }
-                            // 转发模式，将数据复制到输出流中
-                            if ((config.mode & MODE_FORWARDING) != 0 && config.output != null) {
-                                copy (buff, config.output);
-                            }
-                            // 文件保存模式，将数据复制到文件流中
-                            if ((config.mode & MODE_SAVE) != 0 && stream != null) {
-                                copy (buff, stream);
-                            }
-                        }
-                    }
-
-                    @Override
-                    public void onClose (int code, String reason, boolean remote) {
-                        logger.info ("websocket closed, code = {}, reason = {}", code, reason);
-                        // reset the timestamp
-                        timestamp = -1;
-                        // close and clean file stream
-                        closeStream ();
-
-                        if (code != 1000) {
-                            // something happened
-                            dispose ();
-                            throw new RuntimeException ("websocket closed unexpected: code = " + code + ", reason = " + reason);
-                        }
-                    }
-
-                    @Override
-                    public void onError (Exception ex) {}
-
-                    private void closeStream () {
-                        if (stream != null) {
-                            try {
-                                stream.flush ();
-                                stream.close ();
-                            } catch (IOException ignore) {}
-                            finally {
-                                stream = null;
-                            }
-                        }
-                    }
-                };
-                client.connectBlocking ();
-                // When the websocket connection is complete,
-                // send the desired audio format to the server
-                setVoiceFormat ();
-            } catch (Exception ex) {
-                throw new RuntimeException (ex);
-            }
-        }
-        return client;
     }
 
     private void delay () {
@@ -350,7 +221,6 @@ public class TTS {
                         "entering Idle mode and disconnecting the websocket connection",
                         config.timeout
                 );
-                closeWebsocket ();
 
                 if (listener != null) {
                     if (!tasks.offer (() -> listener.idle ())) {
@@ -367,9 +237,7 @@ public class TTS {
                 }
                 // set the synthesising.
                 synthesising = true;
-                current = message;
-                SSMLPayload payload = config.synthesis (message);
-                getOrCreateWebsocketClient ().send (payload.toString ());
+                send (current = message);
                 // Waiting for the previous task to complete
                 while (synthesising && running) {
                     try {
@@ -383,6 +251,11 @@ public class TTS {
                     } finally {
                         locker.unlock ();
                     }
+                }
+
+                if (config.oneShot) {
+                    dispose ();
+                    break;
                 }
             }
 
@@ -432,39 +305,268 @@ public class TTS {
         logger.info ("player done.");
     }
 
-    private void closeWebsocket () {
-        if (client != null) {
-            client.close (1000, "bye");
-            client = null;
-        }
-    }
-
-    private String readLine (ByteBuffer buffer) {
-        byte[] target = new byte[128];
-        int index = 0, remains = buffer.remaining ();
-        if (remains == 0) {
-            return "";
-        }
-        while (index < remains) {
-            if (index >= target.length) {
-                byte[] temp = new byte[target.length << 1];
-                System.arraycopy (target, 0, temp, 0, target.length);
-                target = temp;
-            }
-            target[index] = buffer.get ();
-            if (target[index ++] == '\n') {
-                break;
-            }
-        }
-        return new String (target, 0, index, StandardCharsets.UTF_8);
-    }
-
-    private void copy (byte[] buff, OutputStream out) {
+    private void send (String message) {
         try {
-            out.write (buff);
+            config.check ();
+        } catch (RuntimeException ex) {
+            logger.error (ex.getMessage ());
+            return;
+        }
+
+
+        config.payload.input = message;
+        RequestBody content = RequestBody.create (JSON, new Gson ().toJson (config.payload));
+        Request request = new Request.Builder ().post (content)
+                .url (endpoint)
+                .addHeader ("Content-Type", "application/json;charset=utf-8")
+                .addHeader ("Authorization", "Bearer " + API_KEY).build ();
+        try (Response response = client.newCall (request).execute ()) {
+            if (listener != null) {
+                if (!tasks.offer (() -> listener.started (message))) {
+                    logger.warn ("cannot offer listener start");
+                }
+            }
+            if (response.isSuccessful ()) {
+                timestamp = System.currentTimeMillis ();
+
+                ResponseBody body = response.body ();
+                if (body != null && config.mode != 0) {
+                    // 至少一个模式被激活了
+
+                    byte[] buff = new byte[BUFF_SIZE];
+                    int length;
+                    try (InputStream in = body.byteStream ()) {
+                        while ((length = in.read (buff)) != -1) {
+                            // 实时模式，将数据复制到播放器中
+                            if ((config.mode & MODE_REALTIME) != 0) {
+                                copy (buff, pos, length);
+                            }
+                            // 转发模式，将数据复制到输出流中
+                            if ((config.mode & MODE_FORWARDING) != 0 && config.output != null) {
+                                copy (buff, config.output, length);
+                            }
+                            // 文件保存模式，将数据复制到文件流中
+                            if ((config.mode & MODE_SAVE) != 0 && config.stream != null) {
+                                copy (buff, config.stream, length);
+                            }
+                        }
+                    } finally {
+                        onFinish ();
+                    }
+                }
+
+            } else {
+                logger.warn (response.message ());
+            }
+        } catch (IOException ex) {
+            logger.error ("cannot synthesis message: {}", message);
+            if (logger.isTraceEnabled ()) {
+                logger.warn (ex.getMessage (), ex);
+            }
+        } finally {
+            if (listener != null) {
+                tasks.add (() -> listener.finished (message));
+            }
+        }
+    }
+
+    private void copy (byte[] buff, OutputStream out, int length) {
+        try {
+            out.write (buff, 0, length);
             out.flush ();
         } catch (IOException ex) {
             logger.warn (ex.getMessage (), ex);
         }
+    }
+
+    private Properties loadConfig () {
+        List<String> list = new ArrayList<> (Arrays.asList (CONFIGS));
+        list.add (System.getProperty ("user.home") + "/.edge-tts-wrapper.conf");
+        for (String config : list) {
+            Path path = Paths.get (config);
+            if (Files.exists (path)) {
+                try (InputStream in = Files.newInputStream (path)) {
+                    return loadConfig (in);
+                } catch (IOException ex) {
+                    logger.warn ("cannot read {}, because {}", path, ex.getMessage ());
+                    if (logger.isTraceEnabled ()) {
+                        logger.warn (ex.getMessage (), ex);
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private Properties loadConfig (InputStream in) throws IOException {
+        Properties props = new Properties ();
+        props.load (in);
+        return props;
+    }
+
+    private OkHttpClient createClient () {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder ().connectionPool (cp)
+                .writeTimeout (30, TimeUnit.SECONDS)
+                .connectTimeout (30, TimeUnit.SECONDS)
+                .readTimeout (30, TimeUnit.SECONDS);
+        if (proxy != null) {
+            builder.proxy (proxy);
+            if (isNotEmpty (proxyUser) && isNotEmpty (proxyPassword)) {
+                builder.proxyAuthenticator ((route, response) -> {
+                    String credential = Credentials.basic(proxyUser, proxyPassword);
+                    return response.request().newBuilder()
+                            .header("Proxy-Authorization", credential)
+                            .build();
+                });
+            }
+        }
+        return builder.build ();
+    }
+
+    private void onFinish () {
+        // 一段文本合成完成
+        synthesising = false;   // 一段解码结束
+
+        // Send a signal to announce that a speech synthesis is completed
+        // and the next task can be carried out
+        try {
+            locker.lockInterruptibly ();
+            c.signalAll ();
+        } catch (InterruptedException ignore) {
+        } finally {
+            locker.unlock ();
+        }
+        // trigger the listener
+        if (listener != null) {
+            if (!tasks.offer (() -> listener.finished (current))) {
+                logger.warn ("cannot offer the listener.finished when end");
+            }
+            if ((config.mode & MODE_SAVE) != 0 && config.stream != null) {
+                if (!tasks.offer (() -> {
+                    try {
+                        listener.voiceSaved (current, config.target);
+                    } finally {
+                        config.target = null;
+
+                        // close the file stream
+                        config.closeStream ();
+                    }
+                })) {
+                    logger.warn ("cannot offer the listener.voiceSaved");
+                }
+            }
+        }
+
+        // 如果是 on shot，直接销毁实例
+        if (config.oneShot) {
+            dispose ();
+        }
+    }
+
+    private void initHttp (Properties props) {
+        endpoint                = props.getProperty (KEY_ENDPOINT);
+        API_KEY                 = props.getProperty (KEY_API_KEY);
+        String proxyServer      = props.getProperty (KEY_PROXY_SERVER);
+        String _enable          = props.getProperty (KEY_PROXY_ENABLED);
+        String _port            = props.getProperty (KEY_PROXY_PORT);
+        proxyUser               = props.getProperty (KEY_PROXY_USER);
+        proxyPassword           = props.getProperty (KEY_PROXY_PASSWORD);
+        boolean proxyEnabled    = _enable != null && !_enable.trim ().isEmpty ();
+        int proxyPort;
+        if (_port != null && !_port.trim ().isEmpty ()) {
+            proxyPort = Integer.parseInt (_port.trim ());
+        } else {
+            proxyPort = 8080;
+        }
+        if (proxyEnabled) {
+            proxy = new Proxy (Proxy.Type.HTTP, new InetSocketAddress (proxyServer, proxyPort));
+        } else {
+            proxy = null;
+        }
+    }
+
+    private Properties loadFromCommandLineArgs (String... args) {
+        Properties props = null;
+        String endpoint = null, apiKey = null, proxy = null, user = null, password = null, part;
+        for (int i = 0; i < args.length; i ++) {
+            part = args[i];
+            if (part.startsWith ("--")) {
+                Matcher m = P.matcher (part.trim ());
+                if (m.matches ()) {
+                    String option = m.group (1);
+                    String value  = m.group (2);
+                    switch (option) {
+                        case "endpoint":
+                            endpoint = value.trim ();
+                            break;
+
+                        case "api-key":
+                            apiKey = value.trim ();
+                            break;
+
+                        case "proxy-server":
+                            proxy = value.trim ();
+                            break;
+
+                        case "proxy-user":
+                            user = value.trim ();
+                            break;
+
+                        case "proxy-password":
+                            password = value.trim ();
+                            break;
+
+                        default:
+                            throw new RuntimeException ("unknown option: " + part);
+                    }
+                }
+            } else {
+                i ++;
+                String value = args [i];
+                switch (part) {
+                    case "-e":
+                        endpoint = value.trim ();
+                        break;
+
+                    case "-k":
+                        apiKey = value.trim ();
+                        break;
+
+                    default:
+                        throw new RuntimeException ("unknown option: " + part);
+                }
+            }
+        }
+
+        if (endpoint != null && apiKey != null) {
+            props = new Properties ();
+            props.setProperty (KEY_ENDPOINT, endpoint.trim ());
+            props.setProperty (KEY_API_KEY, apiKey.trim ());
+
+            if (proxy != null) {
+                String[] temp = proxy.split (":");
+                if (isNotEmpty (temp[0])) {
+                    props.setProperty (KEY_PROXY_ENABLED, "true");
+                    props.setProperty (KEY_PROXY_SERVER, temp[0]);
+                    if (isNotEmpty (temp[1])) {
+                        props.setProperty (KEY_PROXY_PORT, temp[1].trim ());
+                    }
+                }
+
+                if (isNotEmpty (user)) {
+                    props.setProperty (KEY_PROXY_USER, user.trim ());
+                    if (isNotEmpty (password)) {
+                        props.setProperty (KEY_PROXY_PASSWORD, password.trim ());
+                    }
+                }
+            }
+        }
+
+        return props;
+    }
+
+    private static boolean isNotEmpty (String text) {
+        return text != null && !text.trim ().isEmpty ();
     }
 }

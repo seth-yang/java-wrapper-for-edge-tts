@@ -1,0 +1,11 @@
+The valid options are:
+    -e  --endpoint=<endpoint>       the endpoint
+    -k  --api-key=<api-key>         the api key for the endpoint
+        --proxy-server=<host:port>  the http proxy
+        --proxy-user=<user>         the user of proxy server
+        --proxy-password=<password> the password for user of the proxy server
+Examples:
+    edge-tts-wrapper -e https://my-endpoint.cloudflare.com/v1/audio/speech -k my-api-key
+    edge-tts-wrapper --endpoint=https://my-endpoint.cloudflare.com/v1/audio/speech \
+                     --api-key=my-api-key \
+                     --proxy-server=localhost:8080 --proxy-user=user1 --proxy-password=MySecret
