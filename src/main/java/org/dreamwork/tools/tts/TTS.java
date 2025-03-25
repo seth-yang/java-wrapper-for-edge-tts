@@ -19,15 +19,12 @@ import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+import static org.dreamwork.tools.tts.CommandLineHelper.isNotEmpty;
 import static org.dreamwork.tools.tts.Const.*;
 import static org.dreamwork.tools.tts.TTSConfig.*;
 
 public class TTS {
-    /** command line argument parser */
-    private static final Pattern P = Pattern.compile ("^--(.*?)=(.*?)$");
     /** default buffer size */
     private static final int BUFF_SIZE = 1024;
     /** MIME-Type */
@@ -76,7 +73,6 @@ public class TTS {
     private Proxy proxy;
     private String proxyUser, proxyPassword;
 
-
     /** 指示是否正在合成语音的治时期 */
     private volatile boolean synthesising = false;
 
@@ -88,14 +84,11 @@ public class TTS {
     /** 最近一次从 websocket 服务器端接收数据 */
     private volatile long timestamp = -1;
 
-    /** 当前正在处理的文本 */
-    private volatile String current;
-
     private final OkHttpClient client;
 
     public TTS (String... args) throws IOException {
         // 先从命令行获取参数
-        Properties props = loadFromCommandLineArgs (args);
+        Properties props = CommandLineHelper.loadFromCommandLineArgs (args);
         // 若命令行未提供参数，从 jvm 参数获取
         if (props == null) {
             endpoint = System.getProperty (KEY_ENDPOINT);
@@ -144,16 +137,20 @@ public class TTS {
      * @param text 待合成的文本
      */
     public void synthesis (String text) {
-        int retry = 3;
-        while (retry --> 0) {
-            if (queue.offer (text)) {
-                if (logger.isTraceEnabled ()) {
-                    logger.trace ("text[{}] cached.", text);
+        if (running) {
+            int retry = 3;
+            while (retry-- > 0) {
+                if (queue.offer (text)) {
+                    if (logger.isTraceEnabled ()) {
+                        logger.trace ("text[{}] cached.", text);
+                    }
+                    return;
                 }
-                return;
             }
+            throw new RuntimeException ("cannot synthesis the text: " + text);
+        } else {
+            throw new IllegalStateException ("the TTS-Engine has been disposed.");
         }
-        throw new RuntimeException ("cannot synthesis the text: " + text);
     }
 
     public void setListener (ITTSListener listener) {
@@ -195,20 +192,14 @@ public class TTS {
             pos.close ();
         } catch (IOException ignore) {}
 
-//        closeWebsocket ();
-
         if (!futures.isEmpty ()) {
             for (Future<?> future : futures) {
                 future.cancel (true);
             }
             futures.clear ();
         }
-    }
 
-    private void delay () {
-        try {
-            Thread.sleep (10);
-        } catch (InterruptedException ignore) {}
+        cp.evictAll ();
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -231,13 +222,13 @@ public class TTS {
             }
             // take next message.
             String message = queue.poll ();
-            if (message != null && !message.isEmpty ()) {
+            if (isNotEmpty (message)) {
                 if (logger.isTraceEnabled ()) {
                     logger.trace ("a new text[{}] take.", message);
                 }
                 // set the synthesising.
                 synthesising = true;
-                send (current = message);
+                send (message);
                 // Waiting for the previous task to complete
                 while (synthesising && running) {
                     try {
@@ -313,7 +304,6 @@ public class TTS {
             return;
         }
 
-
         config.payload.input = message;
         RequestBody content = RequestBody.create (JSON, new Gson ().toJson (config.payload));
         Request request = new Request.Builder ().post (content)
@@ -350,11 +340,8 @@ public class TTS {
                                 copy (buff, config.stream, length);
                             }
                         }
-                    } finally {
-                        onFinish ();
                     }
                 }
-
             } else {
                 logger.warn (response.message ());
             }
@@ -363,17 +350,22 @@ public class TTS {
             if (logger.isTraceEnabled ()) {
                 logger.warn (ex.getMessage (), ex);
             }
-        } finally {
-            if (listener != null) {
-                tasks.add (() -> listener.finished (message));
+            if (listener != null && !tasks.offer (() -> listener.handleException (message, ex))) {
+                logger.warn ("cannot offer listener handle exception");
             }
+        } finally {
+            onFinish (message);
         }
     }
 
     private void copy (byte[] buff, OutputStream out, int length) {
+        timestamp = System.currentTimeMillis ();
         try {
             out.write (buff, 0, length);
             out.flush ();
+            if (logger.isTraceEnabled ()) {
+                logger.trace ("{} byte copied", length);
+            }
         } catch (IOException ex) {
             logger.warn (ex.getMessage (), ex);
         }
@@ -424,7 +416,7 @@ public class TTS {
         return builder.build ();
     }
 
-    private void onFinish () {
+    private void onFinish (String message) {
         // 一段文本合成完成
         synthesising = false;   // 一段解码结束
 
@@ -439,13 +431,13 @@ public class TTS {
         }
         // trigger the listener
         if (listener != null) {
-            if (!tasks.offer (() -> listener.finished (current))) {
+            if (!tasks.offer (() -> listener.finished (message))) {
                 logger.warn ("cannot offer the listener.finished when end");
             }
             if ((config.mode & MODE_SAVE) != 0 && config.stream != null) {
                 if (!tasks.offer (() -> {
                     try {
-                        listener.voiceSaved (current, config.target);
+                        listener.voiceSaved (message, config.target);
                     } finally {
                         config.target = null;
 
@@ -486,87 +478,9 @@ public class TTS {
         }
     }
 
-    private Properties loadFromCommandLineArgs (String... args) {
-        Properties props = null;
-        String endpoint = null, apiKey = null, proxy = null, user = null, password = null, part;
-        for (int i = 0; i < args.length; i ++) {
-            part = args[i];
-            if (part.startsWith ("--")) {
-                Matcher m = P.matcher (part.trim ());
-                if (m.matches ()) {
-                    String option = m.group (1);
-                    String value  = m.group (2);
-                    switch (option) {
-                        case "endpoint":
-                            endpoint = value.trim ();
-                            break;
-
-                        case "api-key":
-                            apiKey = value.trim ();
-                            break;
-
-                        case "proxy-server":
-                            proxy = value.trim ();
-                            break;
-
-                        case "proxy-user":
-                            user = value.trim ();
-                            break;
-
-                        case "proxy-password":
-                            password = value.trim ();
-                            break;
-
-                        default:
-                            throw new RuntimeException ("unknown option: " + part);
-                    }
-                }
-            } else {
-                i ++;
-                String value = args [i];
-                switch (part) {
-                    case "-e":
-                        endpoint = value.trim ();
-                        break;
-
-                    case "-k":
-                        apiKey = value.trim ();
-                        break;
-
-                    default:
-                        throw new RuntimeException ("unknown option: " + part);
-                }
-            }
-        }
-
-        if (endpoint != null && apiKey != null) {
-            props = new Properties ();
-            props.setProperty (KEY_ENDPOINT, endpoint.trim ());
-            props.setProperty (KEY_API_KEY, apiKey.trim ());
-
-            if (proxy != null) {
-                String[] temp = proxy.split (":");
-                if (isNotEmpty (temp[0])) {
-                    props.setProperty (KEY_PROXY_ENABLED, "true");
-                    props.setProperty (KEY_PROXY_SERVER, temp[0]);
-                    if (isNotEmpty (temp[1])) {
-                        props.setProperty (KEY_PROXY_PORT, temp[1].trim ());
-                    }
-                }
-
-                if (isNotEmpty (user)) {
-                    props.setProperty (KEY_PROXY_USER, user.trim ());
-                    if (isNotEmpty (password)) {
-                        props.setProperty (KEY_PROXY_PASSWORD, password.trim ());
-                    }
-                }
-            }
-        }
-
-        return props;
-    }
-
-    private static boolean isNotEmpty (String text) {
-        return text != null && !text.trim ().isEmpty ();
+    private void delay () {
+        try {
+            Thread.sleep (0);
+        } catch (InterruptedException ignore) {}
     }
 }

@@ -26,4 +26,6 @@ public interface ITTSListener {
      * @param path 合成后的语音文件。 mp3 格式
      */
     default void voiceSaved (String text, Path path) {}
+
+    default void handleException (String text, Exception ex) {}
 }
