@@ -87,8 +87,11 @@ public class TTS {
     private final OkHttpClient client;
 
     public TTS (String... args) throws IOException {
-        // 先从命令行获取参数
-        Properties props = CommandLineHelper.loadFromCommandLineArgs (args);
+        // 命令行获取参数为第一优先级
+        this (CommandLineHelper.loadFromCommandLineArgs (args));
+    }
+
+    public TTS (Properties props) throws IOException {
         // 若命令行未提供参数，从 jvm 参数获取
         if (props == null) {
             endpoint = System.getProperty (KEY_ENDPOINT);
