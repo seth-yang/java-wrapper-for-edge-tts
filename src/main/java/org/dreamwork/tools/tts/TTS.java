@@ -366,9 +366,6 @@ public class TTS {
         try {
             out.write (buff, 0, length);
             out.flush ();
-            if (logger.isTraceEnabled ()) {
-                logger.trace ("{} byte copied", length);
-            }
         } catch (IOException ex) {
             logger.warn (ex.getMessage (), ex);
         }
