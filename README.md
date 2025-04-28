@@ -44,7 +44,7 @@ public TTS (Properties props) throws IOException;
 <dependency>
     <groupId>io.github.seth-yang</groupId>
     <artifactId>java-wrapper-for-edge-tts</artifactId>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
 </dependency>
 ```
 ## Examples
@@ -217,6 +217,60 @@ public class DataFrowardExample {
             out.flush ();
             System.out.println ("voice saved as: " + target.toRealPath ());
         }
+    }
+}
+```
+
+## Synthesis text and play local resources
+```java
+import org.dreamwork.tools.tts.ITTSListener;
+import org.dreamwork.tools.tts.TTS;
+import org.dreamwork.tools.tts.VoiceRole;
+
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+public class SynthesisTextAndPlayLocalResourceExample {
+    public static void main (String[] args) throws Exception {
+        CountDownLatch latch = new CountDownLatch (3);
+        TTS tts = new TTS (args);
+        tts.config ()
+                .timeout (500, TimeUnit.MILLISECONDS)
+                .voice (VoiceRole.Xiaoyi);
+        tts.setListener (new ITTSListener () {
+            @Override
+            public void started (Object target) {
+                if (target instanceof String) {
+                    System.out.printf ("starting synthesis text %s%n", target);
+                } else if (target instanceof Path) {
+                    System.out.printf ("starting play file: %s%n", target);
+                } else if (target instanceof InputStream) {
+                    System.out.println ("starting play mp3 within input stream");
+                }
+            }
+
+            @Override
+            public void finished (Object target) {
+                System.out.println ("a voice finished");
+                latch.countDown ();
+            }
+        });
+
+        // synthesis text online
+        tts.synthesis ("1.0.3版本可以混合文本转语音，也可以在队列中播放本地资源了");
+        // play local mp3 file
+        tts.play (Paths.get ("../voices/greetings-35.mp3"));
+        // Play the input stream containing the mp3 audio stream
+        // In the tts.play(InputStream) method, the InputStream object will be closed after the playback is completed. 
+        // Therefore, you cannot call this method in the `try (resource) {}` way.
+        tts.play (Files.newInputStream (Paths.get ("../voices/goodbye-9.mp3")));
+
+        latch.await ();
+        tts.dispose ();
     }
 }
 ```
