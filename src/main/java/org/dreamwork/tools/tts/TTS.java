@@ -46,7 +46,7 @@ public class TTS {
     private final PipedOutputStream pos;
 
     /** messages waiting for send to the websocket */
-    private final Queue<String> queue = new LinkedList<> ();
+    private final Queue<Object> queue = new LinkedList<> ();
 
     /** any listener actions */
     private final BlockingQueue<Runnable> tasks = new LinkedBlockingQueue<> ();
@@ -119,7 +119,7 @@ public class TTS {
 
         ExecutorService executor = Executors.newFixedThreadPool (3);
         // 启动播放器线程
-        futures.add (executor.submit (this::play));
+        futures.add (executor.submit (() -> play ()));
         // 启动语音合成线程
         futures.add (executor.submit (this::runSynthesisTask));
         // 启动专门用于处理外界监听器的线程
@@ -153,6 +153,26 @@ public class TTS {
             throw new RuntimeException ("cannot synthesis the text: " + text);
         } else {
             throw new IllegalStateException ("the TTS-Engine has been disposed.");
+        }
+    }
+
+    public void play (Path path) {
+        if (running) {
+            if (!queue.offer (path)) {
+                if (logger.isTraceEnabled ()) {
+                    logger.warn ("cannot offer path");
+                }
+            }
+        }
+    }
+
+    public void play (InputStream in) {
+        if (running) {
+            if (!queue.offer (in)) {
+                if (logger.isTraceEnabled ()) {
+                    logger.warn ("cannot offer input stream");
+                }
+            }
         }
     }
 
@@ -211,8 +231,7 @@ public class TTS {
         while (running) {
             if (timestamp >= 0 && System.currentTimeMillis () - timestamp > config.timeout) {
                 logger.warn (
-                        "No data has been received for more than {} milliseconds, " +
-                        "entering Idle mode and disconnecting the websocket connection",
+                        "No data has been received for more than {} milliseconds, entering Idle mode",
                         config.timeout
                 );
 
@@ -223,15 +242,51 @@ public class TTS {
                 }
                 timestamp = -1;
             }
+
             // take next message.
-            String message = queue.poll ();
-            if (isNotEmpty (message)) {
-                if (logger.isTraceEnabled ()) {
-                    logger.trace ("a new text[{}] take.", message);
+            Object obj = queue.poll ();
+            if (obj != null) {
+                try {
+                    config.check ();
+                } catch (RuntimeException ex) {
+                    logger.error (ex.getMessage ());
+                    continue;
                 }
+
                 // set the synthesising.
                 synthesising = true;
-                send (message);
+
+                boolean playing = true;
+                try {
+                    if (obj instanceof CharSequence) {
+                        String message = obj.toString ();
+                        if (isNotEmpty (message)) {
+                            if (logger.isTraceEnabled ()) {
+                                logger.trace ("a new text[{}] take.", message);
+                            }
+                            send (message);
+                        }
+                    } else if (obj instanceof Path) {
+                        try (InputStream in = Files.newInputStream ((Path) obj)) {
+                            copy (in);
+                        }
+                    } else if (obj instanceof InputStream) {
+                        copy ((InputStream) obj);
+                    } else {
+                        playing = false;
+                        synthesising = false;
+                    }
+                } catch (Exception ex) {
+                    logger.warn (ex.getMessage (), ex);
+                    if (listener != null && !tasks.offer (() -> listener.handleException (obj, ex))) {
+                        logger.warn ("cannot offer listener handle exception");
+                    }
+                } finally {
+                    if (playing) {
+                        onFinish (obj);
+                    }
+                }
+
                 // Waiting for the previous task to complete
                 while (synthesising && running) {
                     try {
@@ -299,14 +354,7 @@ public class TTS {
         logger.info ("player done.");
     }
 
-    private void send (String message) {
-        try {
-            config.check ();
-        } catch (RuntimeException ex) {
-            logger.error (ex.getMessage ());
-            return;
-        }
-
+    private void send (String message) throws IOException {
         config.payload.input = message;
         RequestBody content = RequestBody.create (JSON, new Gson ().toJson (config.payload));
         Request request = new Request.Builder ().post (content)
@@ -325,39 +373,32 @@ public class TTS {
                 ResponseBody body = response.body ();
                 if (body != null && config.mode != 0) {
                     // 至少一个模式被激活了
-
-                    byte[] buff = new byte[BUFF_SIZE];
-                    int length;
                     try (InputStream in = body.byteStream ()) {
-                        while ((length = in.read (buff)) != -1) {
-                            // 实时模式，将数据复制到播放器中
-                            if ((config.mode & MODE_REALTIME) != 0) {
-                                copy (buff, pos, length);
-                            }
-                            // 转发模式，将数据复制到输出流中
-                            if ((config.mode & MODE_FORWARDING) != 0 && config.output != null) {
-                                copy (buff, config.output, length);
-                            }
-                            // 文件保存模式，将数据复制到文件流中
-                            if ((config.mode & MODE_SAVE) != 0 && config.stream != null) {
-                                copy (buff, config.stream, length);
-                            }
-                        }
+                        copy (in);
                     }
                 }
             } else {
                 logger.warn (response.message ());
             }
-        } catch (IOException ex) {
-            logger.error ("cannot synthesis message: {}", message);
-            if (logger.isTraceEnabled ()) {
-                logger.warn (ex.getMessage (), ex);
+        }
+    }
+
+    private void copy (InputStream in) throws IOException {
+        byte[] buff = new byte[BUFF_SIZE];
+        int length;
+        while ((length = in.read (buff)) != -1) {
+            // 实时模式，将数据复制到播放器中
+            if ((config.mode & MODE_REALTIME) != 0) {
+                copy (buff, pos, length);
             }
-            if (listener != null && !tasks.offer (() -> listener.handleException (message, ex))) {
-                logger.warn ("cannot offer listener handle exception");
+            // 转发模式，将数据复制到输出流中
+            if ((config.mode & MODE_FORWARDING) != 0 && config.output != null) {
+                copy (buff, config.output, length);
             }
-        } finally {
-            onFinish (message);
+            // 文件保存模式，将数据复制到文件流中
+            if ((config.mode & MODE_SAVE) != 0 && config.stream != null) {
+                copy (buff, config.stream, length);
+            }
         }
     }
 
@@ -416,7 +457,7 @@ public class TTS {
         return builder.build ();
     }
 
-    private void onFinish (String message) {
+    private void onFinish (Object message) {
         // 一段文本合成完成
         synthesising = false;   // 一段解码结束
 
