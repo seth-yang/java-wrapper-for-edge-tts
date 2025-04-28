@@ -2,6 +2,43 @@
 A java wrapper for MS edge-tts
 
 ## Quick Start
+
+### Prerequisites
+Before using this library, you need to follow the instructions of [https://github.com/linshenkx/edge-tts-openai-cf-worker](https://github.com/linshenkx/edge-tts-openai-cf-worker)
+to create your own cf worker and prepare the calling url and api-key.
+
+### configuration
+To use this library, the following properties are required:
+- `edge.tts.endpoint`
+- `edge.tts.api-key`
+
+The following properties are optional:
+- `edge.tts.proxy.enabled`
+- `edge.tts.proxy.server`
+- `edge.tts.proxy.port`
+- `edge.tts.proxy.user`
+- `edge.tts.proxy.password`
+
+You can provide values for them via a Java Properties file or via a JVM Option.
+
+Or provides then via program arguments like:
+```text
+    -e  --endpoint=<endpoint>       the endpoint
+    -k  --api-key=<api-key>         the api key for the endpoint
+        --proxy-server=<host:port>  the http proxy
+        --proxy-user=<user>         the user of proxy server
+        --proxy-password=<password> the password for user of the proxy server
+```
+
+`org.dreamwork.tools.tts.TTS` provides two constructors, one for parsing command line arguments
+and the other for parsing `Properties` file.
+
+```java
+public TTS (String... args) throws IOException;
+
+public TTS (Properties props) throws IOException;
+```
+
 ### Dependency
 ```xml
 <dependency>
@@ -22,7 +59,7 @@ import java.io.IOException;
 
 public class OneShotExample {
     public static void main (String[] args) throws IOException {
-        TTS tts = new TTS ();
+        TTS tts = new TTS (args);
         tts.config ().oneShot ();   // process the text then exit the application.
         tts.synthesis ("你好，TTS");
     }
@@ -38,7 +75,7 @@ import java.io.IOException;
 
 public class OneShotAndSaveFileExample {
     public static void main (String[] args) throws IOException {
-        TTS tts = new TTS ();
+        TTS tts = new TTS (args);
         tts.setListener (new ITTSListener () {
             @Override
             public void voiceSaved (String text, Path path) {
@@ -64,7 +101,7 @@ import java.util.concurrent.TimeUnit;
 
 public class ContinuedSynthesisExample {
     public static void main (String[] args) throws Exception {
-        final TTS tts = new TTS ();
+        final TTS tts = new TTS (args);
         tts.config ()
                 .timeout (3, TimeUnit.SECONDS)  // If no data is received from the server after this time, 
                                                 // it will enter idle mode
@@ -103,7 +140,7 @@ public class ChangeVoiceRoleExample {
     static int index = 0;
     public static void main (String[] args) throws IOException {
         final VoiceRole[] roles = VoiceRole.byLocale ("en-GB").toArray (new VoiceRole[0]);
-        final TTS tts = new TTS ();
+        final TTS tts = new TTS (args);
         final Lock locker = new ReentrantLock ();
         final Condition c = locker.newCondition ();
         final String text = "Text to speech enables your applications, tools, " +
@@ -160,7 +197,7 @@ import java.util.concurrent.CountDownLatch;
 
 public class DataFrowardExample {
     public static void main (String[] args) throws IOException, InterruptedException {
-        TTS tts = new TTS ();
+        TTS tts = new TTS (args);
         CountDownLatch latch = new CountDownLatch (1);
         tts.setListener (new ITTSListener () {
             @Override
@@ -190,3 +227,4 @@ public class DataFrowardExample {
 - [https://github.com/rany2/edge-tts](https://github.com/rany2/edge-tts)
 - [https://github.com/Migushthe2nd/MsEdgeTTS](https://github.com/Migushthe2nd/MsEdgeTTS)
 - [https://learn.microsoft.com/zh-cn/azure/cognitive-services/speech-service/index-text-to-speech](https://learn.microsoft.com/zh-cn/azure/cognitive-services/speech-service/index-text-to-speech)
+- [https://github.com/linshenkx/edge-tts-openai-cf-worker](https://github.com/linshenkx/edge-tts-openai-cf-worker)
