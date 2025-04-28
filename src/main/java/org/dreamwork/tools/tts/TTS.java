@@ -258,12 +258,12 @@ public class TTS {
 
                 boolean playing = true;
                 try {
+                    if (listener != null && !tasks.offer (() -> listener.started (obj))) {
+                        logger.warn ("cannot offer listener start");
+                    }
                     if (obj instanceof CharSequence) {
                         String message = obj.toString ();
                         if (isNotEmpty (message)) {
-                            if (logger.isTraceEnabled ()) {
-                                logger.trace ("a new text[{}] take.", message);
-                            }
                             send (message);
                         }
                     } else if (obj instanceof Path) {
@@ -275,6 +275,9 @@ public class TTS {
                     } else {
                         playing = false;
                         synthesising = false;
+                        if (listener != null && !tasks.offer (() -> listener.handleException (obj, new RuntimeException ("unsupported target")))) {
+                            logger.warn ("cannot offer listener handle exception.");
+                        }
                     }
                 } catch (Exception ex) {
                     logger.warn (ex.getMessage (), ex);
@@ -362,11 +365,6 @@ public class TTS {
                 .addHeader ("Content-Type", "application/json;charset=utf-8")
                 .addHeader ("Authorization", "Bearer " + API_KEY).build ();
         try (Response response = client.newCall (request).execute ()) {
-            if (listener != null) {
-                if (!tasks.offer (() -> listener.started (message))) {
-                    logger.warn ("cannot offer listener start");
-                }
-            }
             if (response.isSuccessful ()) {
                 timestamp = System.currentTimeMillis ();
 
